@@ -1,0 +1,8 @@
+['195 1116453904922726544', 1709444605.339045, 5640, 600, 'EDL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
+['190 1116453904922726544', 1709444611.8759048, 4740, 600, 'EDL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
+['185 1116453904922726544', 1709444619.096704, 3780, 600, 'EDL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
+['205 1116453904922726544', 1709444629.2395985, 5100, 600, 'EDL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
+['170 1116453904922726544', 1709444646.3908434, 2520, 180, 'DL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
+['210 1116453904922726544', 1709444683.7355037, 5220, 600, 'EDL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
+['215 1116453904922726544', 1709444691.6554978, 5220, 600, 'EDL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
+['200 1116453904922726544', 1709444733.6526887, 6300, 600, 'EDL', False, False, <TextChannel id=1116463328122904686 name='timers' position=17 nsfw=False news=False category_id=1116665046983004201>]
