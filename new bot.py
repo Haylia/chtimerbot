@@ -18,6 +18,80 @@ def toBool(string):
     else:
         return False
 
+def parse_offset(text):
+    """Parse a time offset string like '5m', '30s', '1h', or '1h30m' into seconds.
+    Returns 0 if the format is not recognised."""
+    if not text:
+        return 0
+    text = text.lower().strip()
+    total = 0
+    current_num = ""
+    for char in text:
+        if char.isdigit():
+            current_num += char
+        elif char in ("h", "m", "s") and current_num:
+            num = int(current_num)
+            if char == "h":
+                total += num * 3600
+            elif char == "m":
+                total += num * 60
+            elif char == "s":
+                total += num
+            current_num = ""
+        else:
+            return 0  # unrecognised character, not a valid offset
+    # If there are leftover digits with no unit, treat as minutes for backwards compat
+    if current_num:
+        return 0  # ambiguous bare number, ignore it
+    return total
+
+async def start_timer(message, bossname, boss_def, offset, messageguild):
+    """Create or replace a timer for a boss.
+    boss_def is a tuple: (name, timer_seconds, window_seconds, category)
+    Returns the reply message sent to the channel."""
+    global currenttimers
+    timer_duration = boss_def[1] - offset
+    timerkey = bossname + " " + str(messageguild)
+
+    # Guard against offset making the timer already due
+    if timer_duration <= 0:
+        await message.channel.send(f'Offset is too large — {bossname} would already be past due. Timer not started.')
+        return
+
+    # Check if replacing an existing timer
+    existing = any(c[0] == timerkey for c in currenttimers)
+    currenttimers = [c for c in currenttimers if c[0] != timerkey]
+    currenttimers.append([timerkey, time.time(), timer_duration, boss_def[2], boss_def[3], False, False, message.channel])
+
+    due_time = int(time.time() + timer_duration)
+    if existing:
+        await message.channel.send(f'{bossname} timer replaced — now due at <t:{due_time}:f> (<t:{due_time}:R>)')
+    else:
+        await message.channel.send(f'{bossname} will be due at <t:{due_time}:f> (<t:{due_time}:R>)')
+
+async def send_with_role(channel, text, role_names):
+    """Send a message to a channel, trying to @mention one or more roles.
+    role_names can be a single string or a list of strings.
+    Falls back to plain text if any role is not found or send fails."""
+    if isinstance(role_names, str):
+        role_names = [role_names]
+    try:
+        mentions = []
+        for name in role_names:
+            role = discord.utils.get(channel.guild.roles, name=name)
+            if role:
+                mentions.append(role.mention)
+        if mentions:
+            await channel.send(text + " " + " ".join(mentions))
+        else:
+            await channel.send(text)
+    except Exception as e:
+        # Channel might be inaccessible — log but don't crash
+        try:
+            await channel.send(text)
+        except Exception:
+            print(f"Could not send to channel {channel}: {e}")
+
 bosstimes = []
 bossnames = []
 privatetimes = []
@@ -88,7 +162,14 @@ async def on_ready():
             line[7] = channel
             currenttimers.append(line)
         f.close()
-        print(f'Loaded {len(currenttimers)} timers from TIMERDUMP.txt')
+        # Remove stale timers that are already past max (bot was offline too long)
+        now = time.time()
+        stale = [c for c in currenttimers if now > c[1] + c[2] + c[3]]
+        if stale:
+            for s in stale:
+                currenttimers.remove(s)
+            print(f'Removed {len(stale)} stale timer(s) that expired while offline')
+        print(f'Loaded {len(currenttimers)} active timer(s) from TIMERDUMP.txt')
     except FileNotFoundError:
         print("No TIMERDUMP.txt found, starting with no timers")
     except Exception as e:
@@ -278,44 +359,22 @@ async def on_message(message):
             embed.set_footer(text="Last updated: " + str(round(time.time() - timerlastupdate, 2)) + " seconds ago")
             await message.channel.send(embed=embed)
 
-    if message.content.lower().split(" ")[0] in privatenames and message.guild.id in privateservers:
-        if len(message.content.lower().split(" ")) == 2:
-                try:
-                    if message.content.lower().split(" ")[1][-1] == "m":
-                        offset = int(message.content.lower().split(" ")[1][:-1])*60
-                    else:
-                        offset = 0
-                except:
-                    offset = 0
-        else:
-            offset = 0
+    # --- Timer creation: boss name triggers ---
+    parts = message.content.lower().split()
+    cmd = parts[0]
+    offset = parse_offset(parts[1]) if len(parts) == 2 else 0
+
+    # Pick the right timer list for this server
+    if cmd in privatenames and message.guild.id in privateservers:
         for b in privatetimes:
-            if b[0] == message.content.lower().split(" ")[0]:
-                await message.channel.send(f'{message.content.lower().split(" ")[0]} will be due at <t:{int(time.time() + b[1] - offset)}:f>')
-                timerkey = message.content.lower().split(" ")[0] + " " + str(messageguild)
-                currenttimers = [c for c in currenttimers if c[0] != timerkey]
-                currenttimers.append([timerkey,time.time(),b[1] - offset,b[2],b[3],False,False,message.channel])
-                #bossname+serverid, starttime, timer, window, catagory, due, preping, sentchannel
-                #0                  1          2      3       4         5    6      7
-    elif message.content.lower().split(" ")[0] in bossnames:
-        if len(message.content.lower().split(" ")) == 2:
-                try:
-                    if message.content.lower().split(" ")[1][-1] == "m":
-                        offset = int(message.content.lower().split(" ")[1][:-1])*60
-                    else:
-                        offset = 0
-                except:
-                    offset = 0
-        else:
-            offset = 0
+            if b[0] == cmd:
+                await start_timer(message, cmd, b, offset, messageguild)
+                break
+    elif cmd in bossnames:
         for b in bosstimes:
-            if b[0] == message.content.lower().split(" ")[0]:
-                await message.channel.send(f'{message.content.lower().split(" ")[0]} will be due at <t:{int(time.time() + b[1] - offset)}:f>')
-                timerkey = message.content.lower().split(" ")[0] + " " + str(messageguild)
-                currenttimers = [c for c in currenttimers if c[0] != timerkey]
-                currenttimers.append([timerkey,time.time(),b[1] - offset,b[2],b[3],False,False,message.channel])
-                #bossname+serverid, starttime, timer, window, catagory, due, preping, sentchannel
-                #0                  1          2      3       4         5    6      7
+            if b[0] == cmd:
+                await start_timer(message, cmd, b, offset, messageguild)
+                break
 
     is_admin = message.author.id == 278288658673434624 or message.author.guild_permissions.administrator
 
@@ -384,104 +443,235 @@ async def on_message(message):
 
 
 @client.command()
-async def cleartimers(ctx):
+async def cleartimers(ctx, category: str = None):
     if not (ctx.author.id == 278288658673434624 or ctx.author.guild_permissions.administrator):
         await ctx.send("You need administrator permissions to use this command")
         return
     global currenttimers
-    currenttimers = [c for c in currenttimers if c[0].split(" ")[1] != str(ctx.guild.id)]
-    await ctx.send("Cleared all timers for this server")
+    guild_id = str(ctx.guild.id)
+    if category:
+        # Clear timers for a specific category (eg, mids, edl, dl, rings)
+        category = category.upper()
+        valid_categories = ["EG", "MIDS", "EDL", "DL", "RINGS", "CUSTOM"]
+        if category not in valid_categories:
+            await ctx.send(f"Unknown category `{category}`. Valid categories: {', '.join(valid_categories)}")
+            return
+        before = len(currenttimers)
+        currenttimers = [c for c in currenttimers if not (c[0].split(" ")[1] == guild_id and c[4] == category)]
+        removed = before - len(currenttimers)
+        await ctx.send(f"Cleared {removed} {category} timer(s) for this server")
+    else:
+        before = len(currenttimers)
+        currenttimers = [c for c in currenttimers if c[0].split(" ")[1] != guild_id]
+        removed = before - len(currenttimers)
+        await ctx.send(f"Cleared {removed} timer(s) for this server")
+
+@client.command()
+async def cancel(ctx, *, bossname: str = None):
+    """Cancel a specific boss timer. Usage: ?cancel dino"""
+    global currenttimers
+    if bossname is None:
+        await ctx.send("Usage: `?cancel <bossname>` — cancel a specific timer\nUse `?cleartimers` to clear all, or `?cleartimers eg` to clear a category")
+        return
+    bossname = bossname.lower().strip()
+    guild_id = str(ctx.guild.id)
+    timerkey = bossname + " " + guild_id
+
+    found = any(c[0] == timerkey for c in currenttimers)
+    if found:
+        currenttimers = [c for c in currenttimers if c[0] != timerkey]
+        await ctx.send(f"Cancelled timer for **{bossname}**")
+    else:
+        # Check if they meant a category
+        if bossname.upper() in ["EG", "MIDS", "EDL", "DL", "RINGS", "CUSTOM"]:
+            await ctx.send(f"No timer found for `{bossname}`. Did you mean `?cleartimers {bossname}`?")
+        else:
+            # Show active timers for this server to help them
+            server_timers = [c[0].split(" ")[0] for c in currenttimers if c[0].split(" ")[1] == guild_id]
+            if server_timers:
+                await ctx.send(f"No timer found for `{bossname}`. Active timers: {', '.join(server_timers)}")
+            else:
+                await ctx.send(f"No timer found for `{bossname}` — there are no active timers for this server")
 
 
+
+
+@client.command()
+async def boss(ctx, action: str = None, *, args: str = None):
+    """Manage the boss timer list for this server.
+    Usage:
+        ?boss list
+        ?boss add <name> <timer_minutes> <window_minutes> <category>
+        ?boss update <name> <timer_minutes> <window_minutes>
+        ?boss delete <name>
+    """
+    if not (ctx.author.id == 278288658673434624 or ctx.author.guild_permissions.administrator):
+        await ctx.send("You need administrator permissions to use this command")
+        return
+
+    global bosstimes, bossnames, privatetimes, privatenames
+
+    is_private = ctx.guild.id in privateservers
+    times_list = privatetimes if is_private else bosstimes
+    names_list = privatenames if is_private else bossnames
+    list_label = "private" if is_private else "public"
+
+    if action is None:
+        await ctx.send(
+            "Usage:\n"
+            "`?boss list` — show all bosses\n"
+            "`?boss add <name> <timer_min> <window_min> <category>` — add a boss\n"
+            "`?boss update <name> <timer_min> <window_min>` — update a boss's times\n"
+            "`?boss delete <name>` — remove a boss"
+        )
+        return
+
+    action = action.lower()
+
+    if action == "list":
+        if not times_list:
+            await ctx.send(f"No bosses in the {list_label} timer list.")
+            return
+        formatted = ""
+        for b in times_list:
+            formatted += f"{b[0]}: {b[1]/60}m timer, {b[2]/60}m window, {b[3]}\n"
+        await ctx.send(f"**{list_label.capitalize()} boss timers:**\nName: Timer, Window, Category\n{formatted}")
+        return
+
+    if action == "add":
+        if args is None:
+            await ctx.send("Usage: `?boss add <name> <timer_min> <window_min> <category>`")
+            return
+        parts = args.split()
+        if len(parts) != 4:
+            await ctx.send("Usage: `?boss add <name> <timer_min> <window_min> <category>`")
+            return
+        name = parts[0].lower()
+        try:
+            timer_min = float(parts[1])
+            window_min = float(parts[2])
+        except ValueError:
+            await ctx.send("Timer and window must be numbers (in minutes).")
+            return
+        category = parts[3].upper()
+        if name in names_list:
+            await ctx.send(f"`{name}` already exists. Use `?boss update {name} <timer> <window>` to change it.")
+            return
+        new_boss = (name, timer_min * 60, window_min * 60, category)
+        times_list.append(new_boss)
+        names_list.append(name)
+        if is_private:
+            save_privatetimers()
+        else:
+            save_bosstimers()
+        await ctx.send(f"Added **{name}** — {timer_min}m timer, {window_min}m window, category {category}")
+        return
+
+    if action == "update":
+        if args is None:
+            await ctx.send("Usage: `?boss update <name> <timer_min> <window_min>`")
+            return
+        parts = args.split()
+        if len(parts) != 3:
+            await ctx.send("Usage: `?boss update <name> <timer_min> <window_min>`")
+            return
+        name = parts[0].lower()
+        try:
+            timer_min = float(parts[1])
+            window_min = float(parts[2])
+        except ValueError:
+            await ctx.send("Timer and window must be numbers (in minutes).")
+            return
+        if name not in names_list:
+            await ctx.send(f"`{name}` not found in the {list_label} timer list. Use `?boss list` to see available bosses.")
+            return
+        idx = names_list.index(name)
+        old = times_list[idx]
+        times_list[idx] = (old[0], timer_min * 60, window_min * 60, old[3])
+        if is_private:
+            save_privatetimers()
+        else:
+            save_bosstimers()
+        await ctx.send(f"Updated **{name}** — {timer_min}m timer, {window_min}m window (was {old[1]/60}m, {old[2]/60}m)")
+        return
+
+    if action == "delete":
+        if args is None:
+            await ctx.send("Usage: `?boss delete <name>`")
+            return
+        name = args.strip().lower()
+        if name not in names_list:
+            await ctx.send(f"`{name}` not found in the {list_label} timer list. Use `?boss list` to see available bosses.")
+            return
+        idx = names_list.index(name)
+        times_list.pop(idx)
+        names_list.pop(idx)
+        if is_private:
+            save_privatetimers()
+        else:
+            save_bosstimers()
+        await ctx.send(f"Deleted **{name}** from the {list_label} timer list.")
+        return
+
+    await ctx.send(f"Unknown action `{action}`. Use `?boss` for usage info.")
 
 
 @tasks.loop(seconds=5)
 async def timerloop():
     global timerlastupdate
-    timerlastupdate = time.time()
+    now = time.time()
+    timerlastupdate = now
     to_remove = []
-    try:
-        for c in currenttimers:
-            try:
-                # 10-minute warning for prot bosses
-                if "prot" in c[0] and c[6] == False and time.time() > c[1] + c[2] - 10*60:
-                    try:
-                        find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                        c[6] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due in 10 minutes ' + find_role.mention)
-                    except:
-                        print("failed to find role " + c[4])
-                        c[6] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due in 10 minutes')
 
-                # 3-minute warning: special case for 215 in specific channel
-                if c[6] == False and time.time() > c[1] + c[2] - 3*60 and c[7].id == 1232156695481024593 and c[0].split(" ")[0] == "215":
-                    try:
-                        find_role = discord.utils.get(c[7].guild.roles, name="Unox")
-                        find_role2 = discord.utils.get(c[7].guild.roles, name="EDL")
-                        c[6] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes ' + find_role.mention + " " + find_role2.mention)
-                    except:
-                        print("failed to find role " + c[4])
-                        c[6] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes')
+    for c in currenttimers:
+        try:
+            bossname = c[0].split(" ")[0]
+            channel = c[7]
+            category = c[4]
+            due_time = c[1] + c[2]
+            max_time = due_time + c[3]
 
-                # 3-minute warning for DL and EDL categories (skip if already announced)
-                elif (c[4] == "DL" or c[4] == "EDL") and c[6] == False and time.time() > c[1] + c[2] - 3*60:
-                    try:
-                        find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                        c[6] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes ' + find_role.mention)
-                    except:
-                        print("failed to find role " + c[4])
-                        c[6] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes')
-
-                # Due announcement: special case for 215 in specific channel
-                if time.time() > c[1] + c[2] and c[5] == False and c[7].id == 1232156695481024593 and c[0].split(" ")[0] == "215":
-                    try:
-                        find_role = discord.utils.get(c[7].guild.roles, name="Unox")
-                        find_role2 = discord.utils.get(c[7].guild.roles, name="EDL")
-                        await c[7].send(f'{c[0].split(" ")[0]} is due ' + find_role.mention + " " + find_role2.mention)
-                        c[5] = True
-                    except:
-                        print("failed to find role " + c[4])
-                        c[5] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due')
-
-                # Due announcement for all other bosses
-                elif time.time() > c[1] + c[2] and c[5] == False:
-                    try:
-                        if c[3] < 15*60:
-                            find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                            await c[7].send(f'{c[0].split(" ")[0]} is due ' + find_role.mention)
-                        else:
-                            await c[7].send(f'{c[0].split(" ")[0]} is due')
-                        c[5] = True
-                    except:
-                        print("failed to find role " + c[4])
-                        c[5] = True
-                        await c[7].send(f'{c[0].split(" ")[0]} is due')
-
-                # Max announcement
-                if time.time() > c[1] + c[2] + c[3]:
-                    if c[4] in ("RINGS", "EG", "MIDS"):
-                        try:
-                            find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                            await c[7].send(f'{c[0].split(" ")[0]} has maxed ' + find_role.mention)
-                        except:
-                            await c[7].send(f'{c[0].split(" ")[0]} has maxed')
-                    else:
-                        await c[7].send(f'{c[0].split(" ")[0]} has maxed')
-                    to_remove.append(c)
-
-            except Exception as e:
-                print(str(e) + "\n A Timer has failed. removing it from the list: " + str(c))
+            # --- Phase 1: Check if maxed (highest priority) ---
+            if now > max_time:
+                if category in ("RINGS", "EG", "MIDS"):
+                    await send_with_role(channel, f'{bossname} has maxed', category)
+                else:
+                    await channel.send(f'{bossname} has maxed')
                 to_remove.append(c)
+                continue  # skip all other phases for this timer
 
-    except Exception as e:
-        print("timer loop failed. we'll get em on the next one")
-        print(e)
+            # --- Phase 2: Check if due ---
+            if now > due_time and c[5] == False:
+                # Special case: boss 215 in specific channel gets Unox + EDL roles
+                if bossname == "215" and channel.id == 1232156695481024593:
+                    await send_with_role(channel, f'{bossname} is due', ["Unox", "EDL"])
+                elif c[3] < 15 * 60:
+                    # Short window bosses get a role mention on due
+                    await send_with_role(channel, f'{bossname} is due', category)
+                else:
+                    await channel.send(f'{bossname} is due')
+                c[5] = True
+                continue  # don't also fire a prep warning on the same tick
+
+            # --- Phase 3: Prep warnings (only if not yet due) ---
+            if c[6] == False and now > due_time - 3 * 60:
+                # prot gets a 10-minute warning instead (handled below)
+                # 215 in specific channel gets Unox + EDL roles
+                if bossname == "215" and channel.id == 1232156695481024593:
+                    await send_with_role(channel, f'{bossname} is due in 3 minutes', ["Unox", "EDL"])
+                    c[6] = True
+                elif category in ("DL", "EDL"):
+                    await send_with_role(channel, f'{bossname} is due in 3 minutes', category)
+                    c[6] = True
+
+            # prot gets a 10-minute warning (exact match, not substring)
+            if bossname == "prot" and c[6] == False and now > due_time - 10 * 60:
+                await send_with_role(channel, f'{bossname} is due in 10 minutes', category)
+                c[6] = True
+
+        except Exception as e:
+            print(f"Timer failed for {c[0]}: {e}")
+            to_remove.append(c)
 
     for c in to_remove:
         if c in currenttimers:
@@ -511,6 +701,18 @@ async def refreshloop():
         print("refresh failed")
         print(e)
     
+
+def save_bosstimers():
+    """Save the current bosstimes list back to BOSSTIMERS.txt"""
+    with open('BOSSTIMERS.txt', 'w') as f:
+        for b in bosstimes:
+            f.write(f"{b[0]},{b[1]/60},{b[2]/60},{b[3]}\n")
+
+def save_privatetimers():
+    """Save the current privatetimes list back to PRIVATETIMERS.txt"""
+    with open('PRIVATETIMERS.txt', 'w') as f:
+        for b in privatetimes:
+            f.write(f"{b[0]},{b[1]/60},{b[2]/60},{b[3]}\n")
 
 def refreshtimers():
     global bosstimes
