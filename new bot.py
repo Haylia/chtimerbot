@@ -2,14 +2,11 @@ import discord
 import os
 import time
 import random
-import gspread
 from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
 from discord.ext import commands, tasks
-from discord import guild, embeds, Embed, InteractionResponse
-from discord.utils import get
 intents = discord.Intents.all()
 bot_activity = discord.Game(name = "with time")
 client = commands.Bot(command_prefix = '?', intents = intents, case_insensitive = True, activity = bot_activity)
@@ -32,16 +29,22 @@ timerlastupdate = 0
 
 with open('APPROVEDSERVERS.txt', 'r') as f:
     for server in f.readlines():
-        approvedservers.append(int(server.strip("\n")))
+        server = server.strip()
+        if server:
+            approvedservers.append(int(server))
 
 with open('PRIVATESERVERS.txt', 'r') as f:
     for server in f.readlines():
-        privateservers.append(int(server.strip("\n")))
+        server = server.strip()
+        if server:
+            privateservers.append(int(server))
 
 with open('BOSSTIMERS.txt', 'r') as f:
     filebosstimes = f.readlines()
     for b in filebosstimes:
-        b = b.strip("\n")
+        b = b.strip()
+        if not b:
+            continue
         b = b.split(",")
         # (bossname, timer, window, catagory)
         bosstimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
@@ -50,45 +53,66 @@ with open('BOSSTIMERS.txt', 'r') as f:
 with open('PRIVATETIMERS.txt', 'r') as f:
     filebosstimes = f.readlines()
     for b in filebosstimes:
-        b = b.strip("\n")
+        b = b.strip()
+        if not b:
+            continue
         b = b.split(",")
         # (bossname, timer, window, catagory)
         privatetimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
         privatenames.append(b[0])
 
-f = open("TIMERDUMP.txt", "r")
-currenttimers = []
-for line in f:
-    line = line.strip("\n")
-    line = line.split(",")
-    line[1] = float(line[1])
-    line[2] = float(line[2])
-    line[3] = float(line[3])
-    line[5] = toBool(line[5])
-    line[6] = toBool(line[6])
-    #not all the channels are in the same guild, so we need to get the channel object from the id
-    line[7] = client.get_channel(int(line[7]))
-    currenttimers.append(line)
-f.close()
-
-
-
-
 @client.event
 async def on_ready():
+    global currenttimers
     print(f'{client.user} has connected to Discord!')
     for guilds in client.guilds:
         print(f'Connected to {guilds.name} - {guilds.id}')
     print(f'Approved servers: {approvedservers}')
-    #run the load function to load the timers from the file
+    # Load timers from file now that channel cache is populated
+    try:
+        f = open("TIMERDUMP.txt", "r")
+        for line in f:
+            line = line.strip("\n")
+            if not line:
+                continue
+            line = line.split(",")
+            line[1] = float(line[1])
+            line[2] = float(line[2])
+            line[3] = float(line[3])
+            line[5] = toBool(line[5])
+            line[6] = toBool(line[6])
+            channel = client.get_channel(int(line[7]))
+            if channel is None:
+                print("failed to get channel for timer: " + str(line))
+                continue
+            line[7] = channel
+            currenttimers.append(line)
+        f.close()
+        print(f'Loaded {len(currenttimers)} timers from TIMERDUMP.txt')
+    except FileNotFoundError:
+        print("No TIMERDUMP.txt found, starting with no timers")
+    except Exception as e:
+        print(f'Error loading timers: {e}')
     timerloop.start()
     refreshloop.start()
     # filedump.start()
+
+
+# on server join, add it to the approved servers list and save to file
+@client.event
+async def on_guild_join(guild):
+    global approvedservers
+    approvedservers.append(guild.id)
+    with open('APPROVEDSERVERS.txt', 'a') as f:
+        f.write(str(guild.id) + "\n")
+    print(f'Joined new guild: {guild.name} - {guild.id}')
 
 @client.event
 async def on_message(message):
     global currenttimers
     if message.author == client.user:
+        return
+    if message.guild is None:
         return
     if (int(message.guild.id) not in approvedservers and int(message.guild.id) not in privateservers):
         print(f'{message.guild.name} is not an approved server')
@@ -98,17 +122,19 @@ async def on_message(message):
     if message.author.id == 278288658673434624 and message.content.lower().split(" ")[0] == 'announcement' and message.content.lower().split(" ")[1] == 'allservers':
         # find all unique return channels in the currenttimers list
         returnchannels = []
-        messagetosend = message.content[23:]
+        parts = message.content.split(" ", 2)
+        messagetosend = parts[2] if len(parts) > 2 else ""
         for c in currenttimers:
             if c[7] not in returnchannels:
                 returnchannels.append(c[7])
         for rc in returnchannels:
             await rc.send("Announcement: " + messagetosend)
-    
+
     if message.author.id == 278288658673434624 and message.content.lower().split(" ")[0] == 'announcement' and message.content.lower().split(" ")[1] == 'oneserver':
-        returnchannelid = message.content.split(" ")[2]
+        parts = message.content.split(" ", 3)
+        returnchannelid = parts[2]
         returnchannel = client.get_channel(int(returnchannelid))
-        messagetosend = message.content[22:]
+        messagetosend = parts[3] if len(parts) > 3 else ""
         await returnchannel.send("Announcement: " + messagetosend)
 
 
@@ -126,7 +152,7 @@ async def on_message(message):
         await message.channel.send(random.choice(coffeegifs))
 
     #<t:1709433660:f>
-    if message.content.lower().split(" ")[0] == 'soon':
+    if message.content.lower().strip() == 'soon':
         embed = discord.Embed(title = "Timer Dashboard", colour=discord.Color.blue())
         serveregs = []
         servermids = []
@@ -135,17 +161,17 @@ async def on_message(message):
         serverrings = []
         servercustoms = []
         for c in currenttimers:
-            if str(messageguild) in c[0] and c[4] == "EG":
+            if c[0].split(" ")[1] == str(messageguild) and c[4] == "EG":
                 serveregs.append(c)
-            if str(messageguild) in c[0] and c[4] == "MIDS":
+            if c[0].split(" ")[1] == str(messageguild) and c[4] == "MIDS":
                 servermids.append(c)
-            if str(messageguild) in c[0] and c[4] == "EDL":
+            if c[0].split(" ")[1] == str(messageguild) and c[4] == "EDL":
                 serveredls.append(c)
-            if str(messageguild) in c[0] and c[4] == "DL":
+            if c[0].split(" ")[1] == str(messageguild) and c[4] == "DL":
                 serverdls.append(c)
-            if str(messageguild) in c[0] and c[4] == "RINGS":
+            if c[0].split(" ")[1] == str(messageguild) and c[4] == "RINGS":
                 serverrings.append(c)
-            if str(messageguild) in c[0] and c[4] == "CUSTOM":
+            if c[0].split(" ")[1] == str(messageguild) and c[4] == "CUSTOM":
                 servercustoms.append(c)
         serveregs = sorted(serveregs, key=lambda x: x[1] + x[2])
         servermids = sorted(servermids, key=lambda x: x[1] + x[2])
@@ -185,7 +211,7 @@ async def on_message(message):
             embed = discord.Embed(title = "Endgame Timer Dashboard", colour=discord.Color.blue())
             serveregs = []
             for c in currenttimers:
-                if str(messageguild) in c[0] and c[4] == "EG":
+                if c[0].split(" ")[1] == str(messageguild) and c[4] == "EG":
                     serveregs.append(c)
             serveregs = sorted(serveregs, key=lambda x: x[1] + x[2])
             if len(serveregs) > 0:
@@ -200,7 +226,7 @@ async def on_message(message):
             embed = discord.Embed(title = "Midgame Timer Dashboard", colour=discord.Color.blue())
             servermids = []
             for c in currenttimers:
-                if str(messageguild) in c[0] and c[4] == "MIDS":
+                if c[0].split(" ")[1] == str(messageguild) and c[4] == "MIDS":
                     servermids.append(c)
             servermids = sorted(servermids, key=lambda x: x[1] + x[2])
             if len(servermids) > 0:
@@ -214,7 +240,7 @@ async def on_message(message):
             embed = discord.Embed(title = "EDL Timer Dashboard", colour=discord.Color.blue())
             serveredls = []
             for c in currenttimers:
-                if str(messageguild) in c[0] and c[4] == "EDL":
+                if c[0].split(" ")[1] == str(messageguild) and c[4] == "EDL":
                     serveredls.append(c)
             serveredls = sorted(serveredls, key=lambda x: x[1] + x[2])
             if len(serveredls) > 0:
@@ -228,7 +254,7 @@ async def on_message(message):
             embed = discord.Embed(title = "DL Timer Dashboard", colour=discord.Color.blue())
             serverdls = []
             for c in currenttimers:
-                if str(messageguild) in c[0] and c[4] == "DL":
+                if c[0].split(" ")[1] == str(messageguild) and c[4] == "DL":
                     serverdls.append(c)
             serverdls = sorted(serverdls, key=lambda x: x[1] + x[2])
             if len(serverdls) > 0:
@@ -242,7 +268,7 @@ async def on_message(message):
             embed = discord.Embed(title = "Ring/Bane/Heli Timer Dashboard", colour=discord.Color.blue())
             serverrings = []
             for c in currenttimers:
-                if str(messageguild) in c[0] and c[4] == "RINGS":
+                if c[0].split(" ")[1] == str(messageguild) and c[4] == "RINGS":
                     serverrings.append(c)
             serverrings = sorted(serverrings, key=lambda x: x[1] + x[2])
             if len(serverrings) > 0:
@@ -266,10 +292,9 @@ async def on_message(message):
         for b in privatetimes:
             if b[0] == message.content.lower().split(" ")[0]:
                 await message.channel.send(f'{message.content.lower().split(" ")[0]} will be due at <t:{int(time.time() + b[1] - offset)}:f>')
-                for c in currenttimers:
-                    if c[0] == message.content.lower().split(" ")[0] + " " + str(messageguild):
-                        currenttimers.remove(c)
-                currenttimers.append([message.content.lower().split(" ")[0] + " " + str(messageguild),time.time(),b[1] - offset,b[2],b[3],False,False,message.channel])
+                timerkey = message.content.lower().split(" ")[0] + " " + str(messageguild)
+                currenttimers = [c for c in currenttimers if c[0] != timerkey]
+                currenttimers.append([timerkey,time.time(),b[1] - offset,b[2],b[3],False,False,message.channel])
                 #bossname+serverid, starttime, timer, window, catagory, due, preping, sentchannel
                 #0                  1          2      3       4         5    6      7
     elif message.content.lower().split(" ")[0] in bossnames:
@@ -286,14 +311,15 @@ async def on_message(message):
         for b in bosstimes:
             if b[0] == message.content.lower().split(" ")[0]:
                 await message.channel.send(f'{message.content.lower().split(" ")[0]} will be due at <t:{int(time.time() + b[1] - offset)}:f>')
-                for c in currenttimers:
-                    if c[0] == message.content.lower().split(" ")[0] + " " + str(messageguild):
-                        currenttimers.remove(c)
-                currenttimers.append([message.content.lower().split(" ")[0] + " " + str(messageguild),time.time(),b[1] - offset,b[2],b[3],False,False,message.channel])
+                timerkey = message.content.lower().split(" ")[0] + " " + str(messageguild)
+                currenttimers = [c for c in currenttimers if c[0] != timerkey]
+                currenttimers.append([timerkey,time.time(),b[1] - offset,b[2],b[3],False,False,message.channel])
                 #bossname+serverid, starttime, timer, window, catagory, due, preping, sentchannel
                 #0                  1          2      3       4         5    6      7
 
-    if message.content.lower().split(" ")[0] == "refresh":
+    is_admin = message.author.id == 278288658673434624 or message.author.guild_permissions.administrator
+
+    if message.content.lower().split(" ")[0] == "refresh" and is_admin:
         refreshtimers()
         formattedbosstimes = ""
         if message.guild.id in privateservers:
@@ -314,7 +340,7 @@ async def on_message(message):
                 formattedbosstimes += f"{b[0]}: {b[1]/60}m, {b[2]/60}m\n"
         await message.channel.send("Boss timers are:\nName: Timer, Window\n" + str(formattedbosstimes))
 
-    if message.content.lower().split(" ")[0] == "dump":
+    if message.content.lower().split(" ")[0] == "dump" and is_admin:
         f = open("TIMERDUMP.txt", "w")
         for c in currenttimers:
             for p in c:
@@ -327,11 +353,13 @@ async def on_message(message):
         f.close()
         await message.channel.send("Dumped current timers to file")
 
-    if message.content.lower().split(" ")[0] == "load":
+    if message.content.lower().split(" ")[0] == "load" and is_admin:
         f = open("TIMERDUMP.txt", "r")
         currenttimers = []
         for line in f:
             line = line.strip("\n")
+            if not line:
+                continue
             line = line.split(",")
             line[1] = float(line[1])
             line[2] = float(line[2])
@@ -339,12 +367,16 @@ async def on_message(message):
             line[5] = toBool(line[5])
             line[6] = toBool(line[6])
             #not all the channels are in the same guild, so we need to get the channel object from the id
-            line[7] = client.get_channel(int(line[7]))
+            channel = client.get_channel(int(line[7]))
+            if channel is None:
+                print("failed to get channel for timer: " + str(line))
+                continue
+            line[7] = channel
             currenttimers.append(line)
         f.close()
         await message.channel.send("Loaded current timers from file")
 
-    if message.content.lower().split(" ")[0] == "refreshservers":
+    if message.content.lower().split(" ")[0] == "refreshservers" and is_admin:
         refreshservers()
         await message.channel.send("Refreshed servers")
     
@@ -353,10 +385,11 @@ async def on_message(message):
 
 @client.command()
 async def cleartimers(ctx):
+    if not (ctx.author.id == 278288658673434624 or ctx.author.guild_permissions.administrator):
+        await ctx.send("You need administrator permissions to use this command")
+        return
     global currenttimers
-    for c in currenttimers:
-        if str(ctx.guild.id) in c[0]:
-            currenttimers.remove(c)
+    currenttimers = [c for c in currenttimers if c[0].split(" ")[1] != str(ctx.guild.id)]
     await ctx.send("Cleared all timers for this server")
 
 
@@ -366,76 +399,93 @@ async def cleartimers(ctx):
 async def timerloop():
     global timerlastupdate
     timerlastupdate = time.time()
+    to_remove = []
     try:
         for c in currenttimers:
-            # print(c[0] + " " + str(c[1]) + " " + str(c[2]) + " " + str(c[3]) + " " + str(c[4]) + " " + str(c[5]) + " " + str(c[6]) + " " + str(c[7]))
-            # print(c[1] + c[2] - 3*60)
-            if "prot" in c[0] and c[6] == False and time.time() > c[1] + c[2] - 10*60:
-                try:
-                    find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                    c[6] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due in 10 minutes ' + find_role.mention)
-                except:
-                    print("failed to find role" + c[4] + " in " + c[7].guild.name)
-                    c[6] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due in 10 minutes')
-            if c[6] == False and time.time() > c[1] + c[2] - 3*60 and c[7].id == 1232156695481024593 and c[0].split(" ")[0] == "215":
-                try:
-                    find_role = discord.utils.get(c[7].guild.roles, name="Unox")
-                    find_role2 = discord.utils.get(c[7].guild.roles, name="EDL")
-                    c[6] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes ' + find_role.mention + " " + find_role2.mention)
-                except:
-                    print("failed to find role" + c[4] + " in " + c[7].guild.name)
-                    c[6] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes')
-            if (c[4] == "DL" or c[4] == "EDL") and c[6] == False and time.time() > c[1] + c[2] - 3*60:
-                try:
-                    find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                    c[6] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes ' + find_role.mention)
-                except:
-                    print("failed to find role" + c[4] + " in " + c[7].guild.name)
-                    c[6] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes')
-            if time.time() > c[1] + c[2] and c[5] == False and c[7].id == 1232156695481024593 and c[0].split(" ")[0] == "215":
-                try:
-                    find_role = discord.utils.get(c[7].guild.roles, name="Unox")
-                    find_role2 = discord.utils.get(c[7].guild.roles, name="EDL")
-                    await c[7].send(f'{c[0].split(" ")[0]} is due ' + find_role.mention + " " + find_role2.mention)
-                    c[5] = True
-                except:
-                    print("failed to find role" + c[4] + " in " + c[7].guild.name)
-                    c[5] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due')
-            if time.time() > c[1] + c[2] and c[5] == False:
-                try:
-                    if c[3] < 15*60:
-                        find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                        await c[7].send(f'{c[0].split(" ")[0]} is due ' + find_role.mention)
-                    else:
-                        await c[7].send(f'{c[0].split(" ")[0]} is due')
-                    c[5] = True
-                except:
-                    print("failed to find role" + c[4] + " in " + c[7].guild.name)
-                    c[5] = True
-                    await c[7].send(f'{c[0].split(" ")[0]} is due')
             try:
-                if time.time() > c[1] + c[2] + c[3] and (c[4] == "RINGS" or c[4] == "EG" or c[4] == "MIDS"):
-                    find_role = discord.utils.get(c[7].guild.roles, name=c[4])
-                    await c[7].send(f'{c[0].split(" ")[0]} has maxed ' + find_role.mention)
-                    currenttimers.remove(c)
+                # 10-minute warning for prot bosses
+                if "prot" in c[0] and c[6] == False and time.time() > c[1] + c[2] - 10*60:
+                    try:
+                        find_role = discord.utils.get(c[7].guild.roles, name=c[4])
+                        c[6] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due in 10 minutes ' + find_role.mention)
+                    except:
+                        print("failed to find role " + c[4])
+                        c[6] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due in 10 minutes')
+
+                # 3-minute warning: special case for 215 in specific channel
+                if c[6] == False and time.time() > c[1] + c[2] - 3*60 and c[7].id == 1232156695481024593 and c[0].split(" ")[0] == "215":
+                    try:
+                        find_role = discord.utils.get(c[7].guild.roles, name="Unox")
+                        find_role2 = discord.utils.get(c[7].guild.roles, name="EDL")
+                        c[6] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes ' + find_role.mention + " " + find_role2.mention)
+                    except:
+                        print("failed to find role " + c[4])
+                        c[6] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes')
+
+                # 3-minute warning for DL and EDL categories (skip if already announced)
+                elif (c[4] == "DL" or c[4] == "EDL") and c[6] == False and time.time() > c[1] + c[2] - 3*60:
+                    try:
+                        find_role = discord.utils.get(c[7].guild.roles, name=c[4])
+                        c[6] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes ' + find_role.mention)
+                    except:
+                        print("failed to find role " + c[4])
+                        c[6] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due in 3 minutes')
+
+                # Due announcement: special case for 215 in specific channel
+                if time.time() > c[1] + c[2] and c[5] == False and c[7].id == 1232156695481024593 and c[0].split(" ")[0] == "215":
+                    try:
+                        find_role = discord.utils.get(c[7].guild.roles, name="Unox")
+                        find_role2 = discord.utils.get(c[7].guild.roles, name="EDL")
+                        await c[7].send(f'{c[0].split(" ")[0]} is due ' + find_role.mention + " " + find_role2.mention)
+                        c[5] = True
+                    except:
+                        print("failed to find role " + c[4])
+                        c[5] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due')
+
+                # Due announcement for all other bosses
+                elif time.time() > c[1] + c[2] and c[5] == False:
+                    try:
+                        if c[3] < 15*60:
+                            find_role = discord.utils.get(c[7].guild.roles, name=c[4])
+                            await c[7].send(f'{c[0].split(" ")[0]} is due ' + find_role.mention)
+                        else:
+                            await c[7].send(f'{c[0].split(" ")[0]} is due')
+                        c[5] = True
+                    except:
+                        print("failed to find role " + c[4])
+                        c[5] = True
+                        await c[7].send(f'{c[0].split(" ")[0]} is due')
+
+                # Max announcement
                 if time.time() > c[1] + c[2] + c[3]:
-                    await c[7].send(f'{c[0].split(" ")[0]} has maxed')
-                    currenttimers.remove(c)
+                    if c[4] in ("RINGS", "EG", "MIDS"):
+                        try:
+                            find_role = discord.utils.get(c[7].guild.roles, name=c[4])
+                            await c[7].send(f'{c[0].split(" ")[0]} has maxed ' + find_role.mention)
+                        except:
+                            await c[7].send(f'{c[0].split(" ")[0]} has maxed')
+                    else:
+                        await c[7].send(f'{c[0].split(" ")[0]} has maxed')
+                    to_remove.append(c)
+
             except Exception as e:
-                print(str(e) + "\n A Timer has failed. removing it from the list" + str(c))
-                if time.time() > c[1] + c[2] + c[3]:
-                    currenttimers.remove(c)
+                print(str(e) + "\n A Timer has failed. removing it from the list: " + str(c))
+                to_remove.append(c)
 
     except Exception as e:
         print("timer loop failed. we'll get em on the next one")
         print(e)
+
+    for c in to_remove:
+        if c in currenttimers:
+            currenttimers.remove(c)
 
 @tasks.loop(seconds=60)
 async def filedump():
@@ -470,10 +520,12 @@ def refreshtimers():
     with open('BOSSTIMERS.txt', 'r') as f:
         filebosstimes = f.readlines()
         for b in filebosstimes:
-            b = b.strip("\n")
+            b = b.strip()
+            if not b:
+                continue
             b = b.split(",")
             # (bossname, timer, window, catagory)
-            bosstimes.append((b[0],int(b[1])*60,int(b[2])*60,b[3]))
+            bosstimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
             bossnames.append(b[0])
     global privatetimes
     global privatenames
@@ -482,7 +534,9 @@ def refreshtimers():
     with open('PRIVATETIMERS.txt', 'r') as f:
         filebosstimes = f.readlines()
         for b in filebosstimes:
-            b = b.strip("\n")
+            b = b.strip()
+            if not b:
+                continue
             b = b.split(",")
             # (bossname, timer, window, catagory)
             privatetimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
@@ -493,12 +547,16 @@ def refreshservers():
     approvedservers = []
     with open('APPROVEDSERVERS.txt', 'r') as f:
         for server in f.readlines():
-            approvedservers.append(int(server.strip("\n")))
+            server = server.strip()
+            if server:
+                approvedservers.append(int(server))
     global privateservers
     privateservers = []
     with open('PRIVATESERVERS.txt', 'r') as f:
         for server in f.readlines():
-            privateservers.append(int(server.strip("\n")))
+            server = server.strip()
+            if server:
+                privateservers.append(int(server))
 
             
 
