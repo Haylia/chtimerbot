@@ -100,6 +100,101 @@ approvedservers = []
 privateservers = []
 currenttimers = []
 timerlastupdate = 0
+# guild_id -> channel object of the most recent (non-bot) message that hit on_message
+last_active_channel = {}
+
+LAST_ACTIVE_FILE = 'LASTACTIVECHANNELS.txt'
+
+def save_last_active_channels():
+    """Persist guild_id,channel_id pairs to disk. Small file, written on each update."""
+    try:
+        with open(LAST_ACTIVE_FILE, 'w') as f:
+            for gid, ch in last_active_channel.items():
+                if ch is None:
+                    continue
+                f.write(f"{gid},{ch.id}\n")
+    except Exception as e:
+        print(f"Failed to save {LAST_ACTIVE_FILE}: {e}")
+
+def load_last_active_channels():
+    """Load last-active channels into memory. Must run after the channel cache
+    is populated (ie inside on_ready), otherwise client.get_channel returns None."""
+    try:
+        with open(LAST_ACTIVE_FILE, 'r') as f:
+            for lineno, raw in enumerate(f.readlines(), start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+                parts = line.split(",")
+                if len(parts) != 2:
+                    print(f"[{LAST_ACTIVE_FILE}:{lineno}] skipping line, expected 2 fields: {line!r}")
+                    continue
+                try:
+                    gid = int(parts[0])
+                    cid = int(parts[1])
+                except ValueError:
+                    print(f"[{LAST_ACTIVE_FILE}:{lineno}] skipping non-integer line: {line!r}")
+                    continue
+                channel = client.get_channel(cid)
+                if channel is None:
+                    print(f"[{LAST_ACTIVE_FILE}:{lineno}] channel {cid} no longer accessible, skipping")
+                    continue
+                last_active_channel[gid] = channel
+        print(f"Loaded {len(last_active_channel)} last-active channel(s) from {LAST_ACTIVE_FILE}")
+    except FileNotFoundError:
+        print(f"No {LAST_ACTIVE_FILE} found, starting with empty last-active map")
+    except Exception as e:
+        print(f"Error loading {LAST_ACTIVE_FILE}: {e}")
+
+_INTERACTION_KEYWORDS = {
+    'coffee', 'soon', 'request', 'refresh', 'info', 'dump', 'load',
+    'refreshservers', 'announcement', 'cleartimers', 'cancel', 'boss',
+}
+
+def is_bot_interaction(content):
+    """Heuristic: does this message look like it's invoking the bot?
+    True for the ? prefix, known keywords, or a known boss-name trigger."""
+    if not content:
+        return False
+    first = content.lower().strip().split()
+    if not first:
+        return False
+    head = first[0]
+    if head.startswith('?'):
+        return True
+    if head in _INTERACTION_KEYWORDS:
+        return True
+    if head in bossnames or head in privatenames:
+        return True
+    return False
+
+def load_timer_file(path, times_out, names_out):
+    """Load a timer file into the given lists. Skips and logs any malformed lines
+    instead of crashing the whole load."""
+    times_out.clear()
+    names_out.clear()
+    try:
+        with open(path, 'r') as f:
+            for lineno, raw in enumerate(f.readlines(), start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+                parts = line.split(",")
+                if len(parts) != 4:
+                    print(f"[{path}:{lineno}] skipping line, expected 4 fields got {len(parts)}: {line!r}")
+                    continue
+                try:
+                    name = parts[0].strip()
+                    timer_min = float(parts[1])
+                    window_min = float(parts[2])
+                    category = parts[3].strip()
+                except ValueError as e:
+                    print(f"[{path}:{lineno}] skipping malformed line {line!r}: {e}")
+                    continue
+                times_out.append((name, timer_min * 60, window_min * 60, category))
+                names_out.append(name)
+    except FileNotFoundError:
+        print(f"{path} not found, starting empty")
 
 with open('APPROVEDSERVERS.txt', 'r') as f:
     for server in f.readlines():
@@ -113,27 +208,8 @@ with open('PRIVATESERVERS.txt', 'r') as f:
         if server:
             privateservers.append(int(server))
 
-with open('BOSSTIMERS.txt', 'r') as f:
-    filebosstimes = f.readlines()
-    for b in filebosstimes:
-        b = b.strip()
-        if not b:
-            continue
-        b = b.split(",")
-        # (bossname, timer, window, catagory)
-        bosstimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
-        bossnames.append(b[0])
-
-with open('PRIVATETIMERS.txt', 'r') as f:
-    filebosstimes = f.readlines()
-    for b in filebosstimes:
-        b = b.strip()
-        if not b:
-            continue
-        b = b.split(",")
-        # (bossname, timer, window, catagory)
-        privatetimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
-        privatenames.append(b[0])
+load_timer_file('BOSSTIMERS.txt', bosstimes, bossnames)
+load_timer_file('PRIVATETIMERS.txt', privatetimes, privatenames)
 
 @client.event
 async def on_ready():
@@ -141,7 +217,7 @@ async def on_ready():
     print(f'{client.user} has connected to Discord!')
     for guilds in client.guilds:
         print(f'Connected to {guilds.name} - {guilds.id}')
-    print(f'Approved servers: {approvedservers}')
+    load_last_active_channels()
     # Load timers from file now that channel cache is populated
     try:
         f = open("TIMERDUMP.txt", "r")
@@ -176,7 +252,7 @@ async def on_ready():
         print(f'Error loading timers: {e}')
     timerloop.start()
     refreshloop.start()
-    # filedump.start()
+    filedump.start()
 
 
 # on server join, add it to the approved servers list and save to file
@@ -195,21 +271,40 @@ async def on_message(message):
         return
     if message.guild is None:
         return
-    if (int(message.guild.id) not in approvedservers and int(message.guild.id) not in privateservers):
-        print(f'{message.guild.name} is not an approved server')
-        return
+    # All guilds may use the bot. privateservers still grants access to the privatetimers list.
     # print(f'{message.guild} - {message.channel} - {message.author}: {message.content}, {time.time()}')
 
+    # Track the most recently used channel per guild — only when the user is
+    # actually invoking the bot, so announcements never land in a random channel.
+    if is_bot_interaction(message.content):
+        prev = last_active_channel.get(message.guild.id)
+        if prev is None or prev.id != message.channel.id:
+            last_active_channel[message.guild.id] = message.channel
+            save_last_active_channels()
+
     if message.author.id == 278288658673434624 and message.content.lower().split(" ")[0] == 'announcement' and message.content.lower().split(" ")[1] == 'allservers':
-        # find all unique return channels in the currenttimers list
-        returnchannels = []
         parts = message.content.split(" ", 2)
         messagetosend = parts[2] if len(parts) > 2 else ""
-        for c in currenttimers:
-            if c[7] not in returnchannels:
-                returnchannels.append(c[7])
-        for rc in returnchannels:
-            await rc.send("Announcement: " + messagetosend)
+        sent = 0
+        skipped = 0
+        failed = 0
+        # Only send to guilds where someone has actually used the bot since startup.
+        # No system-channel / first-text-channel fallbacks — we don't want to post
+        # somewhere we've never been invited to.
+        for guild in client.guilds:
+            channel = last_active_channel.get(guild.id)
+            if channel is None:
+                skipped += 1
+                continue
+            try:
+                await channel.send("Announcement: " + messagetosend)
+                sent += 1
+            except Exception as e:
+                print(f"Failed to send announcement to {guild.name} ({guild.id}): {e}")
+                failed += 1
+        await message.channel.send(
+            f"Announcement sent to {sent} server(s); {skipped} skipped (no recent bot interaction); {failed} failed."
+        )
 
     if message.author.id == 278288658673434624 and message.content.lower().split(" ")[0] == 'announcement' and message.content.lower().split(" ")[1] == 'oneserver':
         parts = message.content.split(" ", 3)
@@ -376,7 +471,9 @@ async def on_message(message):
                 await start_timer(message, cmd, b, offset, messageguild)
                 break
 
-    is_admin = message.author.id == 278288658673434624 or message.author.guild_permissions.administrator
+    # message.author can be a User (not Member) for webhooks/system messages — guild_permissions only exists on Member
+    perms = getattr(message.author, "guild_permissions", None)
+    is_admin = message.author.id == 278288658673434624 or (perms is not None and perms.administrator)
 
     if message.content.lower().split(" ")[0] == "refresh" and is_admin:
         refreshtimers()
@@ -400,16 +497,7 @@ async def on_message(message):
         await message.channel.send("Boss timers are:\nName: Timer, Window\n" + str(formattedbosstimes))
 
     if message.content.lower().split(" ")[0] == "dump" and is_admin:
-        f = open("TIMERDUMP.txt", "w")
-        for c in currenttimers:
-            for p in c:
-                #if its the message channel, the last element, store the channel id instead of the channel object
-                if p == c[7]:
-                    f.write(str(p.id))
-                else:
-                    f.write(str(p) + ",")
-            f.write("\n")
-        f.close()
+        dump_timers_to_file()
         await message.channel.send("Dumped current timers to file")
 
     if message.content.lower().split(" ")[0] == "load" and is_admin:
@@ -440,6 +528,27 @@ async def on_message(message):
         await message.channel.send("Refreshed servers")
     
     await client.process_commands(message)
+
+
+@client.command(name="refresh")
+async def refresh_cmd(ctx):
+    """Reload boss timers from disk (BOSSTIMERS.txt / PRIVATETIMERS.txt)."""
+    if not (ctx.author.id == 278288658673434624 or ctx.author.guild_permissions.administrator):
+        await ctx.send("You need administrator permissions to use this command")
+        return
+    refreshtimers()
+    is_private = ctx.guild.id in privateservers
+    times_list = privatetimes if is_private else bosstimes
+    list_label = "private" if is_private else "public"
+    formatted = ""
+    for b in times_list:
+        formatted += f"{b[0]}: {b[1]/60}m, {b[2]/60}m, {b[3]}\n"
+    if not formatted:
+        formatted = "(empty)\n"
+    await ctx.send(
+        f"Reloaded timers from disk. **{list_label.capitalize()}** list now has {len(times_list)} boss(es):\n"
+        f"Name: Timer, Window, Category\n{formatted}"
+    )
 
 
 @client.command()
@@ -547,13 +656,22 @@ async def boss(ctx, action: str = None, *, args: str = None):
             await ctx.send("Usage: `?boss add <name> <timer_min> <window_min> <category>`")
             return
         name = parts[0].lower()
+        if "," in name or not name:
+            await ctx.send("Boss name must not contain commas or be empty.")
+            return
         try:
             timer_min = float(parts[1])
             window_min = float(parts[2])
         except ValueError:
             await ctx.send("Timer and window must be numbers (in minutes).")
             return
+        if timer_min < 0 or window_min < 0 or timer_min != timer_min or window_min != window_min:
+            await ctx.send("Timer and window must be non-negative numbers.")
+            return
         category = parts[3].upper()
+        if "," in category or not category:
+            await ctx.send("Category must not contain commas or be empty.")
+            return
         if name in names_list:
             await ctx.send(f"`{name}` already exists. Use `?boss update {name} <timer> <window>` to change it.")
             return
@@ -581,6 +699,9 @@ async def boss(ctx, action: str = None, *, args: str = None):
             window_min = float(parts[2])
         except ValueError:
             await ctx.send("Timer and window must be numbers (in minutes).")
+            return
+        if timer_min < 0 or window_min < 0 or timer_min != timer_min or window_min != window_min:
+            await ctx.send("Timer and window must be non-negative numbers.")
             return
         if name not in names_list:
             await ctx.send(f"`{name}` not found in the {list_label} timer list. Use `?boss list` to see available bosses.")
@@ -677,21 +798,21 @@ async def timerloop():
         if c in currenttimers:
             currenttimers.remove(c)
 
+def dump_timers_to_file():
+    """Snapshot currenttimers to TIMERDUMP.txt. Channel object becomes its id."""
+    try:
+        with open("TIMERDUMP.txt", "w") as f:
+            for c in currenttimers:
+                # c = [timerkey, start, timer, window, category, due_announced, warn_announced, channel]
+                fields = [str(c[0]), str(c[1]), str(c[2]), str(c[3]),
+                          str(c[4]), str(c[5]), str(c[6]), str(c[7].id)]
+                f.write(",".join(fields) + "\n")
+    except Exception as e:
+        print(f"filedump failed: {e}")
+
 @tasks.loop(seconds=60)
 async def filedump():
-    # dump the timers to a file every minute
-    global currenttimers
-    f = open("TIMERDUMP.txt", "w")
-    for c in currenttimers:
-        for p in c:
-            #if its the message channel, the last element, store the channel id instead of the channel object
-            #this doesnt work for some reason
-            if p == c[7]:
-                f.write(str(p.id))
-            else:
-                f.write(str(p) + ",")
-        f.write("\n")
-    f.close()
+    dump_timers_to_file()
 
 @tasks.loop(hours=12)
 async def refreshloop():
@@ -715,34 +836,9 @@ def save_privatetimers():
             f.write(f"{b[0]},{b[1]/60},{b[2]/60},{b[3]}\n")
 
 def refreshtimers():
-    global bosstimes
-    global bossnames
-    bosstimes = []
-    bossnames = []
-    with open('BOSSTIMERS.txt', 'r') as f:
-        filebosstimes = f.readlines()
-        for b in filebosstimes:
-            b = b.strip()
-            if not b:
-                continue
-            b = b.split(",")
-            # (bossname, timer, window, catagory)
-            bosstimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
-            bossnames.append(b[0])
-    global privatetimes
-    global privatenames
-    privatetimes = []
-    privatenames = []
-    with open('PRIVATETIMERS.txt', 'r') as f:
-        filebosstimes = f.readlines()
-        for b in filebosstimes:
-            b = b.strip()
-            if not b:
-                continue
-            b = b.split(",")
-            # (bossname, timer, window, catagory)
-            privatetimes.append((b[0],float(b[1])*60,float(b[2])*60,b[3]))
-            privatenames.append(b[0])
+    # Mutate in place so any captured references (eg in active commands) stay in sync
+    load_timer_file('BOSSTIMERS.txt', bosstimes, bossnames)
+    load_timer_file('PRIVATETIMERS.txt', privatetimes, privatenames)
 
 def refreshservers():
     global approvedservers
